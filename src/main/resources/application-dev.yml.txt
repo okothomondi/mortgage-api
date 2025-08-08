@@ -1,0 +1,32 @@
+spring:
+  config:
+    activate:
+      on-profile: dev
+  profiles:
+    active: dev
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/housing-finance-mortgage
+    username: postgres
+    password: ${DB_PASSWORD:0k0th985}
+    hikari:
+      maximum-pool-size: 5
+      connection-timeout: 3000
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: mortgage-group-dev
+      auto-offset-reset: earliest
+
+logging:
+  level:
+    root: INFO
+    org.springframework.web: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    com.okoth.mortgage: DEBUG
+  file:
+    name: logs/mortgage-portal-dev.log
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"

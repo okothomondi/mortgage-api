@@ -1,0 +1,133 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  IMAGE_NAME: mortgage-portal-service
+  DOCKER_REGISTRY: ghcr.io
+  VERSION: ${GITHUB_SHA::7}
+
+jobs:
+  lint-and-format:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Checkstyle Analysis
+        run: ./gradlew checkstyleMain checkstyleTest
+
+      - name: Spotless Check (Code Formatting)
+        run: ./gradlew spotlessCheck
+
+  build-and-test:
+    name: Build & Test
+    needs: lint-and-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Run Tests with Coverage
+        run: ./gradlew test jacocoTestReport
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: build/reports/jacoco/test/html/
+
+      - name: Generate Coverage Badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GITHUB_TOKEN }}
+          filename: jacoco.svg
+          label: Coverage
+          message: jacoco$((100*$(cat build/reports/jacoco/test/jacocoTestReport.csv | awk -F"," '{print $4+$5}' | tail -1 | awk '{print $1}')/$(cat build/reports/jacoco/test/jacocoTestReport.csv | awk -F"," '{print $3+$4+$5}' | tail -1 | awk '{print $1}'))%
+          color: '#2E8B57'
+          path: badges/
+          gistID: ''
+
+  docker-build:
+    name: Docker Build
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.DOCKER_REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repository_url }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  security-scan:
+    name: Security Scan
+    needs: docker-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan Docker Image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  deploy:
+    name: Deploy to Staging
+    needs: security-scan
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Fly CLI
+        run: curl -L https://fly.io/install.sh | sh
+
+      - name: Deploy to Fly.io
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          ./bin/flyctl deploy --app mortgage-portal-staging \
+            --image ${{ env.DOCKER_REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
+            --env SPRING_PROFILES_ACTIVE=staging
